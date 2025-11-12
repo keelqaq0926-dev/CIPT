@@ -1,7 +1,7 @@
-"use client"; // 关键：添加这一行，标记为客户端组件
+"use client";
 import { useState, useRef } from "react";
 import { ToolType, ApiRequestParams } from "../types";
-import { fetchApi, imageToBase64 } from "../lib/api"; // 移除AI压缩依赖，保留imageToBase64
+import { fetchApi, imageToBase64 } from "../lib/api";
 
 const ImageTools = () => {
     const [activeTool, setActiveTool] = useState<ToolType>(ToolType.IMAGE_COMPRESS);
@@ -9,9 +9,9 @@ const ImageTools = () => {
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [result, setResult] = useState<string>("");
     const [loading, setLoading] = useState(false);
-    const [imageResult, setImageResult] = useState<string | null>(null); // 存储处理后的图片链接/Base64
-    const [compressQuality, setCompressQuality] = useState(0.7); // 压缩质量（0.1-1.0）
-    const [maxPixel, setMaxPixel] = useState(1920); // 最大像素限制（默认1920px，超过则等比缩放）
+    const [imageResult, setImageResult] = useState<string | null>(null);
+    const [compressQuality, setCompressQuality] = useState(0.7);
+    const [maxPixel, setMaxPixel] = useState(1920);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     // 切换工具：重置所有状态
@@ -21,17 +21,19 @@ const ImageTools = () => {
         setSelectedFile(null);
         setResult("");
         setImageResult(null);
-        setCompressQuality(0.7); // 重置压缩质量
-        setMaxPixel(1920); // 重置最大像素
+        setCompressQuality(0.7);
+        setMaxPixel(1920);
     };
 
-    // 处理文件选择
+    // 处理文件选择（修复：确保文件正确赋值）
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file && file.type.startsWith("image/")) {
             setSelectedFile(file);
             setImageResult(null);
             setResult("");
+            // 清空input值，避免重复选择同一张图片无反应
+            e.target.value = "";
         }
     };
 
@@ -40,13 +42,12 @@ const ImageTools = () => {
         fileInputRef.current?.click();
     };
 
-    // 新增：前端Canvas压缩图片（降低像素+调整质量）
+    // 前端Canvas压缩图片（保持不变）
     const compressImageByCanvas = async (file: File): Promise<{ base64: string; size: number }> => {
         return new Promise((resolve, reject) => {
             const img = new Image();
-            img.crossOrigin = "anonymous"; // 解决跨域图片问题
+            img.crossOrigin = "anonymous";
 
-            // 先转Base64加载图片
             imageToBase64(file).then(base64 => {
                 img.src = base64;
 
@@ -55,7 +56,6 @@ const ImageTools = () => {
                     const ctx = canvas.getContext("2d");
                     if (!ctx) reject(new Error("Canvas上下文获取失败"));
 
-                    // 计算目标尺寸：等比缩放，最大边长不超过maxPixel
                     let targetWidth = img.width;
                     let targetHeight = img.height;
                     const scaleRatio = Math.min(1, maxPixel / targetWidth, maxPixel / targetHeight);
@@ -65,28 +65,21 @@ const ImageTools = () => {
                         targetHeight = Math.round(targetHeight * scaleRatio);
                     }
 
-                    // 设置Canvas尺寸（降低像素核心步骤）
                     canvas.width = targetWidth;
                     canvas.height = targetHeight;
 
-                    // 绘制图片（抗锯齿优化）
                     ctx.clearRect(0, 0, targetWidth, targetHeight);
                     ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
 
-                    // 转换为Blob（调整质量）
                     canvas.toBlob(
                         (blob) => {
                             if (!blob) reject(new Error("图片压缩失败"));
-                            // 转Base64返回（用于预览和展示）
                             imageToBase64(new File([blob], file.name, { type: blob.type })).then(compressedBase64 => {
-                                resolve({
-                                    base64: compressedBase64,
-                                    size: blob.size // 压缩后文件大小
-                                });
+                                resolve({ base64: compressedBase64, size: blob.size });
                             });
                         },
-                        file.type || "image/jpeg", // 沿用原文件格式，无则默认jpeg
-                        compressQuality // 压缩质量（0.1=最低质量，1.0=原质量）
+                        file.type || "image/jpeg",
+                        compressQuality
                     );
                 };
 
@@ -95,37 +88,91 @@ const ImageTools = () => {
         });
     };
 
-    // 复制链接/Base64功能
+    // 复制功能（保持不变）
     const copyImageUrl = (url: string) => {
         navigator.clipboard.writeText(url).then(() => {
             setResult("链接已复制到剪贴板！");
             setTimeout(() => {
-                setResult(imageResult.startsWith("data:image/") ? "图片Base64已复制" : `图片链接：${url}`);
+                setResult(imageResult?.startsWith("data:image/") ? "图片Base64已复制" : `图片链接：${url}`);
             }, 2000);
         }).catch(() => {
             setResult("链接复制失败，请手动复制");
         });
     };
 
-    // 提交请求（图片压缩单独处理，其他功能沿用原有逻辑）
+    // 新增：缺失的 buildRequestParams 函数（AI功能核心）
+    const buildRequestParams = async (): Promise<ApiRequestParams> => {
+        switch (activeTool) {
+            // AI生图（文本输入）
+            case ToolType.AI_GENERATE:
+                if (!inputValue) throw new Error("请输入生图描述");
+                return {
+                    model: "deepseek-r1",
+                    stream: true,
+                    max_tokens: 1688,
+                    temperature: 0.5,
+                    messages: [{ role: "user", content: `生成图片：${inputValue}` }],
+                };
+
+            // 图片识别（上传图片）
+            case ToolType.IMAGE_RECOGNIZE:
+                if (!selectedFile) throw new Error("请选择图片");
+                const recognizeBase64 = await imageToBase64(selectedFile);
+                return {
+                    model: "gpt-4o",
+                    stream: false,
+                    max_tokens: 800,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text", text: "分析这张图片，返回详细识别结果" },
+                                { type: "image_url", image_url: { url: recognizeBase64 } },
+                            ],
+                        },
+                    ],
+                };
+
+            // 抠图去背景（上传图片）
+            case ToolType.BACKGROUND_REMOVE:
+                if (!selectedFile) throw new Error("请选择图片");
+                const bgRemoveBase64 = await imageToBase64(selectedFile);
+                return {
+                    model: "gemini-2.5-flash-image",
+                    stream: false,
+                    max_tokens: 800,
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text", text: "移除这张图片的背景，仅返回无背景图片的Base64或在线链接" },
+                                { type: "image_url", image_url: { url: bgRemoveBase64 } },
+                            ],
+                        },
+                    ],
+                };
+
+            default:
+                throw new Error("未知工具类型");
+        }
+    };
+
+    // 提交请求（保持不变，现在可调用 buildRequestParams）
     const handleSubmit = async () => {
         try {
             setLoading(true);
             setImageResult(null);
 
-            // 图片压缩：前端Canvas处理（不调用AI）
+            // 图片压缩：前端Canvas处理
             if (activeTool === ToolType.IMAGE_COMPRESS) {
                 if (!selectedFile) throw new Error("请选择图片");
 
-                // 执行前端压缩
                 const compressedData = await compressImageByCanvas(selectedFile);
-                const originalSize = selectedFile.size / 1024 / 1024; // 原大小（MB）
-                const compressedSize = compressedData.size / 1024 / 1024; // 压缩后大小（MB）
-                const compressRatio = Math.round(((originalSize - compressedSize) / originalSize) * 100); // 压缩比例
+                const originalSize = selectedFile.size / 1024 / 1024;
+                const compressedSize = compressedData.size / 1024 / 1024;
+                const compressRatio = Math.round(((originalSize - compressedSize) / originalSize) * 100);
 
-                // 存储压缩后的Base64（用于预览）
                 setImageResult(compressedData.base64);
-                // 显示压缩信息
                 setResult(
                     `压缩成功！\n` +
                     `原始尺寸：${selectedFile.width || "未知"}x${selectedFile.height || "未知"}px | 大小：${originalSize.toFixed(2)}MB\n` +
@@ -135,7 +182,7 @@ const ImageTools = () => {
                 return;
             }
 
-            // 其他功能（AI生图、识别、抠图）沿用原有逻辑
+            // AI生图、识别、抠图：调用 buildRequestParams（现在已定义）
             const params = await buildRequestParams();
             const data = await fetchApi(params);
 
@@ -163,7 +210,7 @@ const ImageTools = () => {
                 }
             }
         } catch (error) {
-            setResult((error as Error).message);
+            setResult(`❌ ${(error as Error).message}`);
         } finally {
             setLoading(false);
         }
@@ -205,14 +252,14 @@ const ImageTools = () => {
                         />
                     </div>
                 ) : (
-                    // 其他工具：图片上传 + 图片压缩专属配置
+                    // 其他工具：图片上传 + 压缩配置（修复：优化上传按钮样式和交互）
                     <div>
-                        <button
+                        <label
                             onClick={triggerFileSelect}
-                            className="px-6 py-3 bg-gray-300 hover:bg-gray-400 rounded-lg mb-4 shadow-md transition duration-200"
+                            className="inline-block px-6 py-3 bg-gray-300 hover:bg-gray-400 rounded-lg mb-4 shadow-md transition duration-200 cursor-pointer"
                         >
                             选择图片
-                        </button>
+                        </label>
                         <input
                             type="file"
                             ref={fileInputRef}
@@ -221,17 +268,17 @@ const ImageTools = () => {
                             className="hidden"
                         />
                         {selectedFile && (
-                            <p className="text-sm text-gray-600 mb-4">
+                            <p className="text-sm text-gray-600 mb-4 bg-white px-3 py-2 rounded-md inline-block">
                                 已选择：{selectedFile.name} | 大小：{(selectedFile.size / 1024 / 1024).toFixed(2)}MB
                             </p>
                         )}
 
-                        {/* 图片压缩专属：质量+像素调节滑块 */}
+                        {/* 图片压缩专属配置 */}
                         {activeTool === ToolType.IMAGE_COMPRESS && (
-                            <div className="mb-4 space-y-4">
+                            <div className="mb-4 space-y-4 bg-white p-4 rounded-lg">
                                 {/* 压缩质量调节 */}
                                 <div>
-                                    <label className="block mb-1 text-sm text-gray-600">
+                                    <label className="block mb-1 text-sm text-gray-600 font-medium">
                                         压缩质量：{Math.round(compressQuality * 100)}%
                                     </label>
                                     <input
@@ -241,13 +288,13 @@ const ImageTools = () => {
                                         step="0.1"
                                         value={compressQuality}
                                         onChange={(e) => setCompressQuality(Number(e.target.value))}
-                                        className="w-full"
+                                        className="w-full accent-blue-500"
                                     />
                                 </div>
 
                                 {/* 最大像素调节 */}
                                 <div>
-                                    <label className="block mb-1 text-sm text-gray-600">
+                                    <label className="block mb-1 text-sm text-gray-600 font-medium">
                                         最大边长限制：{maxPixel}px（超过自动缩放）
                                     </label>
                                     <input
@@ -257,7 +304,7 @@ const ImageTools = () => {
                                         step="100"
                                         value={maxPixel}
                                         onChange={(e) => setMaxPixel(Number(e.target.value))}
-                                        className="w-full"
+                                        className="w-full accent-blue-500"
                                     />
                                 </div>
                             </div>
@@ -268,7 +315,7 @@ const ImageTools = () => {
                 {/* 提交按钮 */}
                 <button
                     onClick={handleSubmit}
-                    className="w-full py-4 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-lg transition duration-200 hover:scale-105"
+                    className="w-full py-4 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-lg transition duration-200 hover:scale-105 font-medium"
                     disabled={loading}
                 >
                     {loading ? (
@@ -301,7 +348,9 @@ const ImageTools = () => {
                     </div>
                 )}
                 {/* 文本结果 */}
-                <pre className="whitespace-pre-wrap text-sm text-gray-700">{result}</pre>
+                <pre className="whitespace-pre-wrap text-sm text-gray-700 bg-white p-3 rounded-md border border-gray-200">
+                    {result}
+                </pre>
             </div>
         </div>
     );
