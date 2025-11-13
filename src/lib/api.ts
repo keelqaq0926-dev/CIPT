@@ -32,7 +32,7 @@ export const compressImage = async (
         img.onload = () => {
             const canvas = document.createElement("canvas");
             const ctx = canvas.getContext("2d");
-            if (!ctx) resolve(file); // 若获取不到 Canvas 上下文，返回原文件
+            if (!ctx) { resolve(file); return; } // 若获取不到 Canvas 上下文，返回原文件
 
             // 保持宽高比，限制最大宽度 1920（避免图片过大）
             const ratio = Math.min(1, 1920 / img.width);
