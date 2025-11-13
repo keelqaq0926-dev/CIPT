@@ -1,18 +1,40 @@
 "use client";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { ToolType, ApiRequestParams } from "../types";
 import { fetchApi, imageToBase64 } from "../lib/api";
 
-const ImageTools = () => {
-    const [activeTool, setActiveTool] = useState<ToolType>(ToolType.IMAGE_COMPRESS);
+type ImageToolsProps = {
+    mode?: "all" | "single";
+    initialTool?: ToolType;
+    className?: string;
+};
+
+const ImageTools = ({ mode = "all", initialTool, className }: ImageToolsProps) => {
+    const [activeTool, setActiveTool] = useState<ToolType>(initialTool ?? ToolType.IMAGE_COMPRESS);
     const [inputValue, setInputValue] = useState("");
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [result, setResult] = useState<string>("");
     const [loading, setLoading] = useState(false);
     const [imageResult, setImageResult] = useState<string | null>(null);
+    const [showViewer, setShowViewer] = useState(false);
     const [compressQuality, setCompressQuality] = useState(0.7);
     const [maxPixel, setMaxPixel] = useState(1920);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (mode === "single" && initialTool) {
+            setActiveTool(initialTool);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [mode, initialTool]);
+
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === "Escape") setShowViewer(false);
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, []);
 
     // 切换工具：重置所有状态
     const handleToolChange = (tool: ToolType) => {
@@ -21,6 +43,7 @@ const ImageTools = () => {
         setSelectedFile(null);
         setResult("");
         setImageResult(null);
+        setShowViewer(false);
         setCompressQuality(0.7);
         setMaxPixel(1920);
     };
@@ -54,7 +77,8 @@ const ImageTools = () => {
                 img.onload = () => {
                     const canvas = document.createElement("canvas");
                     const ctx = canvas.getContext("2d");
-                    if (!ctx) reject(new Error("Canvas上下文获取失败"));
+                    if (!ctx) { reject(new Error("Canvas上下文获取失败")); return; }
+                    const context = ctx as CanvasRenderingContext2D;
 
                     let targetWidth = img.width;
                     let targetHeight = img.height;
@@ -68,15 +92,18 @@ const ImageTools = () => {
                     canvas.width = targetWidth;
                     canvas.height = targetHeight;
 
-                    ctx.clearRect(0, 0, targetWidth, targetHeight);
-                    ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+                    context.clearRect(0, 0, targetWidth, targetHeight);
+                    context.drawImage(img, 0, 0, targetWidth, targetHeight);
 
                     canvas.toBlob(
                         (blob) => {
-                            if (!blob) reject(new Error("图片压缩失败"));
-                            imageToBase64(new File([blob], file.name, { type: blob.type })).then(compressedBase64 => {
-                                resolve({ base64: compressedBase64, size: blob.size });
-                            });
+                            if (!blob) { reject(new Error("图片压缩失败")); return; }
+                            const outBlob = blob as Blob;
+                            imageToBase64(new File([outBlob], file.name, { type: outBlob.type }))
+                              .then(compressedBase64 => {
+                                resolve({ base64: compressedBase64, size: outBlob.size });
+                              })
+                              .catch(reject);
                         },
                         file.type || "image/jpeg",
                         compressQuality
@@ -111,7 +138,7 @@ const ImageTools = () => {
                     stream: true,
                     max_tokens: 1688,
                     temperature: 0.5,
-                    messages: [{ role: "user", content: `生成图片：${inputValue}` }],
+                    messages: [{ role: "user", content: { type: "text", text: `生成图片：${inputValue}` } }],
                 };
 
             // 图片识别（上传图片）
@@ -173,10 +200,11 @@ const ImageTools = () => {
                 const compressRatio = Math.round(((originalSize - compressedSize) / originalSize) * 100);
 
                 setImageResult(compressedData.base64);
+                setShowViewer(true);
                 setResult(
                     `压缩成功！\n` +
-                    `原始尺寸：${selectedFile.width || "未知"}x${selectedFile.height || "未知"}px | 大小：${originalSize.toFixed(2)}MB\n` +
-                    `压缩后尺寸：${compressedData.base64.match(/width="(\d+)"/)?.[1] || "未知"}x${compressedData.base64.match(/height="(\d+)"/)?.[1] || "未知"}px | 大小：${compressedSize.toFixed(2)}MB\n` +
+                    `原始大小：${originalSize.toFixed(2)}MB\n` +
+                    `压缩后大小：${compressedSize.toFixed(2)}MB\n` +
                     `压缩比例：${compressRatio}% | 质量：${(compressQuality * 100).toFixed(0)}%`
                 );
                 return;
@@ -196,6 +224,15 @@ const ImageTools = () => {
                     resultText += decoder.decode(value);
                     setResult(resultText);
                 }
+                const streamContent = resultText;
+                const mdMatch = streamContent.match(/!\[.*?\]\((https?:\/\/[^\)]+)\)/);
+                const directMatch = streamContent.match(/https?:\/\/[^\s)]+/);
+                const dataMatch = streamContent.match(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+={0,2}/);
+                const imageUrl = mdMatch?.[1] || directMatch?.[0] || dataMatch?.[0];
+                if (imageUrl) {
+                    setImageResult(imageUrl);
+                    setShowViewer(true);
+                }
             } else {
                 const content = data.choices?.[0]?.message?.content || "";
                 const imageUrlRegex = /!\[.*?\]\((https?:\/\/[^\)]+)\)/;
@@ -204,6 +241,7 @@ const ImageTools = () => {
                 if (match && match[1]) {
                     const imageUrl = match[1];
                     setImageResult(imageUrl);
+                    setShowViewer(true);
                     setResult(`图片链接：${imageUrl}`);
                 } else {
                     setResult("处理结果：" + content);
@@ -216,27 +254,28 @@ const ImageTools = () => {
         }
     };
 
+    const containerBase = mode === "all" ? "w-full max-w-4xl mx-auto" : "w-full";
     return (
-        <div className="w-full max-w-4xl mx-auto p-6 bg-gradient-to-r from-blue-200 to-purple-300 rounded-xl shadow-lg">
+        <div className={`${containerBase} p-6 glass-panel ${className ?? ""}`.trim()}>
             {/* 工具切换栏 */}
-            <div className="flex flex-wrap gap-4 mb-6 justify-center">
-                {Object.values(ToolType).map((tool) => (
-                    <button
-                        key={tool}
-                        className={`px-6 py-3 rounded-lg transition duration-300 ease-in-out transform ${
-                            activeTool === tool
-                                ? "bg-gradient-to-r from-blue-500 to-indigo-500 text-white"
-                                : "bg-gray-200 hover:bg-gray-300"
-                        }`}
-                        onClick={() => handleToolChange(tool)}
-                    >
-                        {tool === ToolType.IMAGE_COMPRESS && "图片压缩"}
-                        {tool === ToolType.AI_GENERATE && "AI 生图"}
-                        {tool === ToolType.IMAGE_RECOGNIZE && "图片识别"}
-                        {tool === ToolType.BACKGROUND_REMOVE && "抠图去背景"}
-                    </button>
-                ))}
-            </div>
+            {mode === "all" && (
+                <div className="flex justify-center mb-6">
+                    <div className="segmented">
+                        {Object.values(ToolType).map((tool) => (
+                            <button
+                                key={tool}
+                                className={`${activeTool === tool ? "active" : ""}`}
+                                onClick={() => handleToolChange(tool)}
+                            >
+                                {tool === ToolType.IMAGE_COMPRESS && "图片压缩"}
+                                {tool === ToolType.AI_GENERATE && "AI 生图"}
+                                {tool === ToolType.IMAGE_RECOGNIZE && "图片识别"}
+                                {tool === ToolType.BACKGROUND_REMOVE && "抠图去背景"}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {/* 输入区域 */}
             <div className="mb-6">
@@ -248,7 +287,7 @@ const ImageTools = () => {
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
                             placeholder="输入生图描述（如：一只猫在草地上）"
-                            className="w-full p-4 text-lg rounded-lg border-2 border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+                            className="ui-input mb-4"
                         />
                     </div>
                 ) : (
@@ -256,7 +295,7 @@ const ImageTools = () => {
                     <div>
                         <label
                             onClick={triggerFileSelect}
-                            className="inline-block px-6 py-3 bg-gray-300 hover:bg-gray-400 rounded-lg mb-4 shadow-md transition duration-200 cursor-pointer"
+                            className="btn-base btn-secondary mb-4 cursor-pointer"
                         >
                             选择图片
                         </label>
@@ -268,14 +307,14 @@ const ImageTools = () => {
                             className="hidden"
                         />
                         {selectedFile && (
-                            <p className="text-sm text-gray-600 mb-4 bg-white px-3 py-2 rounded-md inline-block">
+                            <p className="text-sm mb-4 glass-panel px-3 py-2 inline-block">
                                 已选择：{selectedFile.name} | 大小：{(selectedFile.size / 1024 / 1024).toFixed(2)}MB
                             </p>
                         )}
 
                         {/* 图片压缩专属配置 */}
                         {activeTool === ToolType.IMAGE_COMPRESS && (
-                            <div className="mb-4 space-y-4 bg-white p-4 rounded-lg">
+                            <div className="mb-4 space-y-4 glass-panel p-4">
                                 {/* 压缩质量调节 */}
                                 <div>
                                     <label className="block mb-1 text-sm text-gray-600 font-medium">
@@ -315,7 +354,8 @@ const ImageTools = () => {
                 {/* 提交按钮 */}
                 <button
                     onClick={handleSubmit}
-                    className="w-full py-4 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-lg transition duration-200 hover:scale-105 font-medium"
+                    className="btn-base btn-primary w-full disabled:opacity-60 disabled:cursor-not-allowed"
+                    aria-busy={loading}
                     disabled={loading}
                 >
                     {loading ? (
@@ -327,7 +367,7 @@ const ImageTools = () => {
             </div>
 
             {/* 结果展示 */}
-            <div className="mt-6 p-6 border rounded-lg bg-gray-50 shadow-lg">
+            <div className="mt-6 p-6 glass-panel">
                 <h3 className="text-xl font-semibold mb-2">处理结果</h3>
                 {/* 渲染图片 */}
                 {imageResult && (
@@ -335,25 +375,48 @@ const ImageTools = () => {
                         <img
                             src={imageResult}
                             alt="处理后的图片"
-                            className="max-w-full h-auto rounded-lg border-4 border-indigo-200 shadow-lg"
+                            className="max-w-full h-auto rounded-lg border cursor-zoom-in"
+                            onClick={() => setShowViewer(true)}
                             style={{ maxHeight: "400px" }}
                         />
                         {/* 复制按钮 */}
                         <button
                             onClick={() => copyImageUrl(imageResult)}
-                            className="px-4 py-2 bg-gray-300 text-sm rounded-lg hover:bg-gray-400 transition duration-200"
+                            className="btn-base btn-secondary text-sm"
                         >
                             {imageResult.startsWith("data:image/") ? "复制图片Base64" : "一键复制图片链接"}
                         </button>
                     </div>
                 )}
                 {/* 文本结果 */}
-                <pre className="whitespace-pre-wrap text-sm text-gray-700 bg-white p-3 rounded-md border border-gray-200">
+                <pre className="whitespace-pre-wrap text-sm">
                     {result}
                 </pre>
             </div>
+
+            {imageResult && showViewer && (
+                <div className="fixed inset-0 z-[60] grid place-items-center bg-black/50 p-4" onClick={() => setShowViewer(false)}>
+                    <div className="glass-panel p-3 max-w-[92vw] max-h-[88vh]" onClick={(e) => e.stopPropagation()}>
+                        <img
+                            src={imageResult}
+                            alt="处理后的图片预览"
+                            className="max-w-full max-h-[72vh] object-contain rounded"
+                        />
+                        <div className="mt-3 flex justify-end gap-2">
+                            <button
+                                onClick={() => copyImageUrl(imageResult)}
+                                className="btn-base btn-secondary text-sm"
+                            >
+                                {imageResult.startsWith("data:image/") ? "复制图片Base64" : "复制图片链接"}
+                            </button>
+                            <a href={imageResult} download className="btn-base btn-primary text-sm">下载图片</a>
+                            <button onClick={() => setShowViewer(false)} className="btn-base btn-secondary text-sm">关闭</button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
-};
+}
 
 export default ImageTools;
